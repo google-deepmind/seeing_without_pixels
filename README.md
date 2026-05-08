@@ -1,51 +1,75 @@
-# seeing_without_pixels
+# Seeing without Pixels: Perception from Camera Trajectories
+[**Seeing without Pixels: Perception from Camera Trajectories**](https://arxiv.org/abs/2511.21681)
+Zihui Xue, Kristen Grauman, Dima Damen, Andrew Zisserman, Tengda Han
+arXiv, 2024.
+[project page](https://sites.google.com/view/seeing-without-pixels/) | [arxiv](https://arxiv.org/abs/2511.21681) | [bibtex](#citation)
 
-TODO(b/508584439): Add a description for your new project, explain what is
-being released here, etc... Additional, the following sections are normally
-expected for all releases. Feel free to add additional sections if appropriate
-for your project.
+##  Setup
+```bash
+conda env create -f environment.yml -n camformer
+```
+**Data**: download and unzip `final_data.zip` ([link](https://drive.google.com/file/d/1zYV8LJQBeeHjNvYgIFD5HGygWqbZ2g97/view?usp=sharing)) to the project folder.
 
-## Installation
+## Pretraining
 
-Write instructions for how the user should install your code. The instructions
-should ideally be valid when copy-pasted. You can combine this with the Usage
-section if there's no separate installation step.
+### Training
+```bash
+# EgoExo4D
+python train.py --dataset egoexo4d_pretrain_longseq --take_duration 8 --sample_dur --encode_pose 11
 
-## Usage
+# DynPose-100K
+python train.py --dataset dynpose_pretrain --method gt --encode_pose 2  # original pose
+python train.py --dataset dynpose_pretrain --method vipe --encode_pose 2    # vipe pose
+```
 
-Write example usage of your code. The instructions should ideally be valid when
-copy-pasted, and will be used by your technical reviewer to verify that your
-package functions correctly.
+### Eval
+```bash
+# EgoExo4D
+python train.py --dataset egoexo4d_pretrain_longseq --scenario all --test --num_gpus 1 --batch_size 1000 --take_duration 8 --sample_dur --encode_pose 11 --ckpt ~/final_data/checkpoints/egoexo4d/bs1024_sampleddur8_pose11/checkpoints/best-epoch=498-val_loss=5.6122.ckpt
 
-## Citing this work
+# Nymeria
+python train.py --dataset nymeria_pretrain --test --num_gpus 1 --batch_size 1000 --encode_pose 11 --ckpt ~/final_data/checkpoints/egoexo4d/bs1024_sampleddur16_pose11/checkpoints/best-epoch=272-val_loss=5.6991.ckpt --text_column a/b/c/d
 
-Add citation details here, usually a pastable BibTeX snippet:
+# DynPose-100K
+python train.py --dataset dynpose_pretrain --batch_size 5000 --test --num_gpus 1 --eval_data samevideo  --method gt --ckpt ~/final_data/checkpoints/dynpose100k/v1_gt/checkpoints/best-epoch=188-val_loss=6.2618.ckpt   # original pose
+python train.py --dataset dynpose_pretrain --method vipe --batch_size 5000 --test --num_gpus 1 --eval_data samevideo --ckpt ~/final_data/checkpoints/dynpose100k/v1_vipe/checkpoints/best-epoch=315-val_loss=6.0542.ckpt    # vipe pose
+```
+
+The generated features will be saved in `final_data/retrieval_features/ours/`, Run `python baselines/compute_metrics.py` to read the retrieval numbers.
+
+
+## Downstream
+### Scenario classification
+```bash
+python train_ar.py --dataset egoexo4d_scenario --num_gpus 1 --batch_size 128 --take_duration 16 --test_take_duration 16 --sample_dur --encode_pose 11 --init_ckpt ~/final_data/checkpoints/egoexo4d/bs1024_sampleddur16_pose11/checkpoints/best-epoch=272-val_loss=5.6991.ckpt
+```
+
+### Scenario classification (subset, 4-second clip)
+```bash
+# no init
+python train_ar.py --dataset egoexo4d_scenario_subset --num_gpus 1 --batch_size 128 --encode_pose 2 --umeyama_transform --method gt/megasam/vipe/pi3
+# init with our pretrained ckpt
+python train_ar.py --dataset egoexo4d_scenario_subset --num_gpus 1 --batch_size 128 --encode_pose 2 --init_ckpt ~/data/logs/egoexo4d_pretrain_longseq/bs1024_dur4_pose2_sr4_new/checkpoints/best-epoch=469-val_loss=5.6075.ckpt --method gt/megasam/vipe/pi3
+# inference
+python train_ar.py --dataset egoexo4d_scenario_subset --ckpt /home/sherryxue_google_com/data/logs/egoexo4d_scenario_subset_8label/encodepose11_lr1e-4wd1e-3/vipe/checkpoints/best-epoch=182-val_acc=0.6158.ckpt --encode_pose 11 --method vipe --umeyama_transform --test
+```
+
+### Keystep recognition (downsampled 5FPS clip)
+```bash
+python tasks/extract_features.py --task cls_subset --window_size 20 --window_stride 2 --init_ckpt ~/data/logs/egoexo4d_pretrain_longseq/bs1024_dur4_pose2_sr4_new/checkpoints/best-epoch=469-val_loss=5.6075.ckpt --umeyama_transform --method gt/megasam/vipe/pi3
+```
+Then run `python downstream/linearSVM.py` to read the linear SVM classification numbers.
+
+
+## Citation
+
+If you find our work inspiring or use our codebase in your research, please consider giving a star ⭐ and a citation.
 
 ```
-@article{publicationname,
-      title={Publication Name},
-      author={Author One and Author Two and Author Three},
-      year={2026},
+@article{xue2025seeing,
+  title={Seeing without Pixels: Perception from Camera Trajectories},
+  author={Xue, Zihui and Grauman, Kristen and Damen, Dima and Zisserman, Andrew and Han, Tengda},
+  journal={arXiv preprint arXiv:2511.21681},
+  year={2025}
 }
 ```
-
-## License and disclaimer
-
-Copyright 2026 Google LLC
-
-All software is licensed under the Apache License, Version 2.0 (Apache 2.0);
-you may not use this file except in compliance with the Apache 2.0 license.
-You may obtain a copy of the Apache 2.0 license at:
-https://www.apache.org/licenses/LICENSE-2.0
-
-All other materials are licensed under the Creative Commons Attribution 4.0
-International License (CC-BY). You may obtain a copy of the CC-BY license at:
-https://creativecommons.org/licenses/by/4.0/legalcode
-
-Unless required by applicable law or agreed to in writing, all software and
-materials distributed here under the Apache 2.0 or CC-BY licenses are
-distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
-either express or implied. See the licenses for the specific language governing
-permissions and limitations under those licenses.
-
-This is not an official Google product.
