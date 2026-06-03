@@ -1,8 +1,11 @@
 # Seeing without Pixels: Perception from Camera Trajectories
 
 [Seeing without Pixels: Perception from Camera Trajectories](https://arxiv.org/abs/2511.21681)
-Zihui Xue, Kristen Grauman, Dima Damen, Andrew Zisserman, Tengda Han
+
+[Zihui Xue](https://zihuixue.github.io/), [Kristen Grauman](https://www.cs.utexas.edu/~grauman/), [Dima Damen](https://dimadamen.github.io/), [Andrew Zisserman](https://www.robots.ox.ac.uk/~az/), [Tengda Han](https://tengdahan.github.io/)
+
 CVPR 2026
+
 [Project page](https://sites.google.com/view/seeing-without-pixels) | [arXiv](https://arxiv.org/abs/2511.21681) | [Data and checkpoints](DATA.md) | [Citation](#citation)
 
 ---
