@@ -100,10 +100,18 @@ def _process_take(chunk_data, data_dir, save_dir, sample_rate, train_alpha):
       if os.path.exists(abs_path):
         continue
       try:
-        start_idx = df[df['relative_time'] >= start_time].index[0]
-        end_idx = df[df['relative_time'] <= end_time].index[-1]
+        # Get relative times as a numpy array for fast search
+        times = df['relative_time'].values
+        
+        # Use binary search O(log N) instead of linear scan O(N)
+        start_idx = np.searchsorted(times, start_time, side='left')
+        end_idx = np.searchsorted(times, end_time, side='right') - 1
+        
+        # Validation check: skip if indices are out of bounds or invalid
+        if start_idx >= len(times) or end_idx < 0 or start_idx > end_idx:
+            continue
       except Exception:
-        continue
+          continue
 
       sub_df = df.iloc[start_idx : end_idx + 1]
       absolute_pose = sub_df[[
