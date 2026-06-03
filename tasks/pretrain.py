@@ -13,10 +13,23 @@
 # limitations under the License.
 # ==============================================================================
 
+"""Base CamFormer contrastive pretraining task.
+
+This is the non-contextualized ("short sequence") variant: the camera-pose
+encoder internally mean-pools each trajectory to a single motion embedding,
+which is aligned with the CLIP text embedding via symmetric InfoNCE.
+
+`train.py` selects this task for datasets whose name does NOT contain
+`longseq` (e.g. `dynpose_pretrain`, `nymeria_pretrain`). The contextualized
+Ego-Exo4D variant lives in `tasks/pretrain_longseq.py` and reuses `CLIPLoss`
+from this module.
+"""
+
 import os
+
 import clip
 from loader import create_loader
-from models.cm_encoder import CameraPoseSeqEncoder, RaymapPoseEncoder
+from models.cm_encoder import CameraPoseSeqEncoder
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -24,26 +37,19 @@ import torch.nn.functional as F
 
 
 class CLIPLoss(nn.Module):
+  """Symmetric InfoNCE over matched (motion, text) pairs in a batch."""
 
   def __init__(self, temperature=0.07):
     super().__init__()
     self.temperature = temperature
 
   def forward(self, motion_features, text_features):
-    # Normalize features
     motion_features = F.normalize(motion_features, dim=-1)
     text_features = F.normalize(text_features, dim=-1)
-
-    # Compute similarity matrix
     logits = torch.matmul(motion_features, text_features.t()) / self.temperature
-
-    # Labels are diagonal (matching pairs)
     labels = torch.arange(len(motion_features), device=motion_features.device)
-
-    # Compute loss in both directions
     loss_m = F.cross_entropy(logits, labels)
     loss_t = F.cross_entropy(logits.t(), labels)
-
     return (loss_m + loss_t) / 2
 
 
@@ -52,46 +58,27 @@ class CameraPoseTextPretraining(pl.LightningModule):
   def __init__(self, args):
     super().__init__()
     self.args = args
+    self.output_dim = 512  # CLIP ViT-B/32 text-embed dim
 
-    # Camera motion encoder
-    if False:
-      self.model = RaymapPoseEncoder(
-          in_channels=6,
-          d_model=args.d_model,
-          output_dim=4096 if args.use_text_embeds else 512,
-          nhead=args.nhead,
-          num_layers=args.num_layers,
-          dim_feedforward=args.dim_feedforward,
-          dropout=args.dropout,
-          pooling='mean',
-      )
-    else:
-      self.model = CameraPoseSeqEncoder(
-          d_model=args.d_model,
-          encode_pose=args.encode_pose,
-          output_dim=4096
-          if args.use_text_embeds
-          else 512,  # Match CLIP's feature dimension
-          nhead=args.nhead,
-          num_layers=args.num_layers,
-          dim_feedforward=args.dim_feedforward,
-          dropout=args.dropout,
-          pooling='mean',
-          use_scenario_label=args.use_scenario_label,
-          use_learnable_gravity=args.use_learnable_gravity,
-      )
+    self.model = CameraPoseSeqEncoder(
+        d_model=args.d_model,
+        encode_pose=args.encode_pose,
+        output_dim=self.output_dim,
+        nhead=args.nhead,
+        num_layers=args.num_layers,
+        dim_feedforward=args.dim_feedforward,
+        dropout=args.dropout,
+        pooling='mean',
+        use_scenario_label=args.use_scenario_label,
+        use_learnable_gravity=args.use_learnable_gravity,
+    )
 
-    # Load CLIP model
-    if not args.use_text_embeds:
-      self.clip_model, _ = clip.load('ViT-B/32', device=self.device)
-      # Freeze CLIP parameters
-      for param in self.clip_model.parameters():
-        param.requires_grad = False
+    # Frozen CLIP text tower.
+    self.clip_model, _ = clip.load('ViT-B/32', device=self.device)
+    for param in self.clip_model.parameters():
+      param.requires_grad = False
 
-    # Loss function
     self.criterion = CLIPLoss()
-
-    # Save hyperparameters for logging
     self.save_hyperparameters()
 
     if args.init_ckpt != '':
@@ -99,48 +86,50 @@ class CameraPoseTextPretraining(pl.LightningModule):
       checkpoint = torch.load(
           args.init_ckpt, map_location='cpu', weights_only=False
       )
-      # If using PyTorch Lightning checkpoint, use 'state_dict'
       state_dict = (
           checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
       )
-      # Remove 'model.' prefix if present in keys
       new_state_dict = {}
       for k, v in state_dict.items():
         if k.startswith('model.'):
           new_state_dict[k[len('model.') :]] = v
         else:
           new_state_dict[k] = v
-      self.model.load_state_dict(new_state_dict, strict=False)
+      result = self.model.load_state_dict(new_state_dict, strict=False)
+      if result.unexpected_keys:
+        print(
+            f'[init_ckpt] ignored {len(result.unexpected_keys)} non-encoder'
+            f' key(s) (e.g. {result.unexpected_keys[:3]})'
+        )
+      if result.missing_keys:
+        raise RuntimeError(
+            f"init_ckpt '{args.init_ckpt}' is missing"
+            f' {len(result.missing_keys)} encoder weight(s) (e.g.'
+            f' {result.missing_keys[:5]}); this usually means --pose_encoding'
+            ' does not match the checkpoint (Ego-Exo4D = rel9d_grav, DynPose ='
+            ' rel9d).'
+        )
 
     self.test_motion_features = []
     self.test_text_features = []
 
   def configure_optimizers(self):
-    optimizer = torch.optim.AdamW(
+    return torch.optim.AdamW(
         self.model.parameters(),
         lr=self.args.lr,
         weight_decay=self.args.weight_decay,
     )
-    return optimizer
+
+  def _encode_text(self, texts):
+    text_tokens = clip.tokenize(texts).to(self.device)
+    with torch.no_grad():
+      return self.clip_model.encode_text(text_tokens)
 
   def training_step(self, batch, batch_idx):
     poses, pad_mask, texts, lengths = batch
-
-    # Get motion features
     motion_features = self.model(poses, pad_mask, lengths)
-
-    # Handle text based on whether it's raw text or pre-computed embeddings
-    if self.args.use_text_embeds:
-      text_features = texts.detach().to(self.device)
-    else:
-      text_tokens = clip.tokenize(texts).to(self.device)
-      with torch.no_grad():
-        text_features = self.clip_model.encode_text(text_tokens)
-
-    # Compute loss
+    text_features = self._encode_text(texts)
     loss = self.criterion(motion_features, text_features)
-
-    # Log metrics
     self.log(
         'train_loss',
         loss,
@@ -153,86 +142,54 @@ class CameraPoseTextPretraining(pl.LightningModule):
 
   def validation_step(self, batch, batch_idx):
     poses, pad_mask, texts, lengths = batch
-
-    # Get motion features
     motion_features = self.model(poses, pad_mask, lengths)
-
-    # Handle text based on whether it's raw text or pre-computed embeddings
-    if self.args.use_text_embeds:
-      text_features = texts.detach().to(self.device)
-    else:
-      text_tokens = clip.tokenize(texts).to(self.device)
-      with torch.no_grad():
-        text_features = self.clip_model.encode_text(text_tokens)
-
-    # Compute loss
+    text_features = self._encode_text(texts)
     loss = self.criterion(motion_features, text_features)
 
-    # Compute similarity matrix for retrieval metrics
     motion_features = F.normalize(motion_features, dim=-1)
     text_features = F.normalize(text_features, dim=-1)
-
-    # if self.args.test:
-    #
     sim_matrix = torch.matmul(motion_features, text_features.t())
 
-    # Calculate retrieval metrics
-    motion_to_text_ranks = self._calculate_ranks(sim_matrix)
-    text_to_motion_ranks = self._calculate_ranks(sim_matrix.t())
-
+    m2t = self._calculate_ranks(sim_matrix)
+    t2m = self._calculate_ranks(sim_matrix.t())
     metrics = {
         'val_loss': loss,
-        'm2t_r1': (motion_to_text_ranks < 1).float().mean(),
-        'm2t_r5': (motion_to_text_ranks < 5).float().mean(),
-        'm2t_r10': (motion_to_text_ranks < 10).float().mean(),
-        'm2t_median_rank': motion_to_text_ranks.median(),
-        't2m_r1': (text_to_motion_ranks < 1).float().mean(),
-        't2m_r5': (text_to_motion_ranks < 5).float().mean(),
-        't2m_r10': (text_to_motion_ranks < 10).float().mean(),
-        't2m_median_rank': text_to_motion_ranks.median(),
+        'm2t_r1': (m2t < 1).float().mean(),
+        'm2t_r5': (m2t < 5).float().mean(),
+        'm2t_r10': (m2t < 10).float().mean(),
+        'm2t_median_rank': m2t.median(),
+        't2m_r1': (t2m < 1).float().mean(),
+        't2m_r5': (t2m < 5).float().mean(),
+        't2m_r10': (t2m < 10).float().mean(),
+        't2m_median_rank': t2m.median(),
     }
-
-    # Log all metrics
     for name, value in metrics.items():
       self.log(
           name, value, on_step=False, on_epoch=True, prog_bar=True, logger=True
       )
-
     return metrics
 
   def test_step(self, batch, batch_idx):
-    # metrics = self.validation_step(batch, batch_idx)
-    # # Rename metrics from val_ to test_ prefix
-    # return {k.replace('val_', 'test_'): v for k, v in metrics.items()}
-
     poses, pad_mask, texts, lengths = batch
     motion_features = self.model(poses, pad_mask, lengths)
-    text_tokens = clip.tokenize(texts).to(self.device)
-    with torch.no_grad():
-      text_features = self.clip_model.encode_text(text_tokens)
-
+    text_features = self._encode_text(texts)
     motion_features = F.normalize(motion_features, dim=-1)
     text_features = F.normalize(text_features, dim=-1)
-
     self.test_motion_features.append(motion_features.detach().cpu())
     self.test_text_features.append(text_features.detach().cpu())
 
   def on_test_end(self):
-    all_features = torch.cat(
-        self.test_motion_features, dim=0
-    )  # Shape: [dataset_size, d]
-    all_text_features = torch.cat(
-        self.test_text_features, dim=0
-    )  # Shape: [dataset_size, d]
+    all_features = torch.cat(self.test_motion_features, dim=0)
+    all_text_features = torch.cat(self.test_text_features, dim=0)
 
-    if self.args.dataset in ['egoexo4d_pretrain', 'dynpose_pretrain']:
-      save_dir = f"final_data/retrieval_features/ours/{self.args.dataset}/{self.args.eval_data}_{self.args.ckpt.split('/')[-3]}"  # _{self.args.eval_data}/egovisible{self.args.ego_visible}'
+    ref = self.args.ckpt or self.args.init_ckpt
+    tag = os.path.splitext(os.path.basename(ref))[0] if ref else 'eval'
+    if self.args.dataset == 'dynpose_pretrain':
+      save_dir = f'final_data/retrieval_features/ours/{self.args.dataset}/{tag}_{self.args.pose_source}'
     elif self.args.dataset == 'nymeria_pretrain':
-      save_dir = f"final_data/retrieval_features/ours/{self.args.dataset}/{self.args.ckpt.split('/')[-3]}_gravity{self.args.use_learnable_gravity}/text_{self.args.text_column}"
-    elif self.args.dataset == 'demo':
-      save_dir = f"final_data/retrieval_features/ours/{self.args.dataset}/{self.args.ckpt.split('/')[-3]}"
+      save_dir = f'final_data/retrieval_features/ours/{self.args.dataset}/{tag}/text_{self.args.text_column}'
     else:
-      save_dir = 'tmp/cam_viz/oursfeatures_full/'
+      save_dir = 'tmp/retrieval_features/ours_full/'
     os.makedirs(save_dir, exist_ok=True)
     torch.save(all_features, os.path.join(save_dir, 'frames.pt'))
     torch.save(all_text_features, os.path.join(save_dir, 'text.pt'))
@@ -242,13 +199,9 @@ class CameraPoseTextPretraining(pl.LightningModule):
     )
 
   def _calculate_ranks(self, sim_matrix):
-    # For each row, get the indices that would sort it in descending order
     sorted_indices = torch.argsort(sim_matrix, dim=-1, descending=True)
-    # Create a tensor of correct indices (diagonal)
     correct_indices = torch.arange(len(sim_matrix), device=sim_matrix.device)
-    # Find where the correct indices appear in the sorted list
-    ranks = torch.where(sorted_indices == correct_indices[:, None])[1]
-    return ranks
+    return torch.where(sorted_indices == correct_indices[:, None])[1]
 
   def train_dataloader(self):
     return create_loader(self.args, 'train')

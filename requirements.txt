@@ -1,0 +1,29 @@
+# CamFormer — camera-trajectory / text pretraining.
+# Versions below are the ones this code was tested with (Python 3.9, Linux/CUDA 12).
+
+# --- Deep learning ---
+# Install the torch/torchvision build matching your CUDA from https://pytorch.org
+# if the pinned wheels don't fit your setup.
+torch==2.7.0
+torchvision==0.22.0
+pytorch-lightning==2.5.1.post0
+
+# --- OpenAI CLIP (frozen text tower) ---
+# Not on PyPI; installed from source. Pulls in ftfy/regex/tqdm as well.
+clip @ git+https://github.com/openai/CLIP.git
+
+# --- Scientific stack ---
+numpy==2.0.2
+scipy==1.13.1
+pandas==2.2.3
+scikit-learn==1.6.1
+matplotlib==3.9.4
+tqdm==4.67.1
+ftfy==6.3.1
+regex==2024.11.6
+
+# --- Logging ---
+# tensorboard is used by the default logger; wandb is only needed for training
+# (remove it if you only run --test).
+tensorboard==2.19.0
+wandb==0.20.1
