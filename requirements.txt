@@ -4,7 +4,7 @@
 # --- Deep learning ---
 # Install the torch/torchvision build matching your CUDA from https://pytorch.org
 # if the pinned wheels don't fit your setup.
-torch==2.7.0
+torch==2.13.0
 torchvision==0.22.0
 pytorch-lightning==2.5.1.post0
 
